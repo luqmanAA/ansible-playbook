@@ -1,0 +1,247 @@
+---
+- name: Deploy ExpressJS App and Configure PostgreSQL
+  hosts: hng
+  become: yes
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    pg_admin_user: admin
+    pg_admin_password: "{{ lookup('password', '/var/secrets/pg_pw.txt length=16 chars=ascii_letters') }}"
+    pg_database: hng_stage_5b_db
+    app_port: 3000
+    db_host: localhost
+    db_port: 5432
+    redis_host: localhost
+    redis_port: 6379
+
+  tasks:
+    - name: Ensure necessary packages are installed
+      apt:
+        name:
+          - git
+          - postgresql
+          - python3-pip
+          - curl
+          - gnupg
+          - nodejs
+          - python3-psycopg2
+          - redis-server
+          - yarn
+        state: present
+        update_cache: yes
+
+    - name: Add NodeSource GPG key
+      apt_key:
+        url: 'https://deb.nodesource.com/gpgkey/nodesource.gpg.key'
+        state: present
+
+    - name: Add NodeSource APT repository
+      apt_repository:
+        repo: 'deb https://deb.nodesource.com/node_18.x focal main'
+        state: present
+
+    - name: Add Nginx GPG key
+      apt_key:
+        url: 'https://nginx.org/keys/nginx_signing.key'
+        state: present
+
+    - name: Add Official Nginx Repository
+      apt_repository:
+        repo: 'deb [signed-by=/usr/share/keyrings/nginx_signing.gpg] http://nginx.org/packages/ubuntu/ focal nginx'
+        state: present
+        filename: 'nginx'
+        validate_certs: no
+
+    - name: Install Nginx 1.26
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Install psycopg2 using pip (if needed, for some Python versions)
+      pip:
+        name: psycopg2-binary
+        state: present
+        extra_args: "--break-system-packages"
+
+    - name: Ensure PostgreSQL is running
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: Ensure Redis is running
+      service:
+        name: redis-server
+        state: started
+        enabled: yes
+
+    - name: Ensure /var/secrets directory exists
+      file:
+        path: /var/secrets
+        state: directory
+        mode: '0700'
+
+    - name: Create PostgreSQL database
+      postgresql_db:
+        name: "{{ pg_database }}"
+        state: present
+
+    - name: Create PostgreSQL superuser
+      postgresql_user:
+        name: "{{ pg_admin_user }}"
+        password: "{{ pg_admin_password }}"
+        role_attr_flags: SUPERUSER
+        state: present
+
+    - name: Save PostgreSQL admin credentials to /var/secrets/pg_pw.txt
+      copy:
+        dest: /var/secrets/pg_pw.txt
+        content: |
+          [PostgreSQL Admin Credentials]
+          User: {{ pg_admin_user }}
+          Password: {{ pg_admin_password }}
+        mode: '0600'
+
+    - name: Ensure the hng user exists
+      user:
+        name: hng
+        state: present
+        shell: /bin/bash
+        create_home: no
+
+    - name: Add hng user to the sudo group
+      user:
+        name: hng
+        groups: sudo
+        append: yes
+
+    - name: Create destination directory if it does not exist
+      file:
+        path: /opt/stage_5b
+        state: directory
+        mode: '0755'
+
+    - name: Change ownership of the destination directory to hng user
+      file:
+        path: /opt/stage_5b
+        owner: hng
+        group: hng
+        recurse: yes
+
+    - name: Create log directory
+      file:
+        path: /var/log/stage_5b
+        state: directory
+        mode: '0755'
+
+    - name: Ensure correct ownership of log directory
+      file:
+        path: /var/log/stage_5b
+        owner: hng
+        group: hng
+
+    - name: Clone the repository
+      git:
+        repo: 'https://github.com/hngprojects/hng_boilerplate_expressjs.git'
+        dest: /opt/stage_5b
+        version: 'devops'
+        force: yes
+
+    - name: Copy .env.example to .env
+      command: cp /opt/stage_5b/.env.example /opt/stage_5b/.env
+
+    - name: Update .env file with database and Redis credentials
+      lineinfile:
+        path: /opt/stage_5b/.env
+        regexp: '^{{ item.key }}='
+        line: '{{ item.key }}={{ item.value }}'
+      loop:
+        - { key: 'PORT', value: '{{ app_port }}' }
+        - { key: 'DB_USER', value: '{{ pg_admin_user }}' }
+        - { key: 'DB_HOST', value: '{{ db_host }}' }
+        - { key: 'DB_PASSWORD', value: '{{ pg_admin_password }}' }
+        - { key: 'DB_PORT', value: '{{ db_port }}' }
+        - { key: 'DB_NAME', value: '{{ pg_database }}' }
+        - { key: 'REDIS_HOST', value: '{{ redis_host }}' }
+        - { key: 'REDIS_PORT', value: '{{ redis_port }}' }
+
+    - name: Change ownership of .env file to hng user
+      file:
+        path: /opt/stage_5b/.env
+        owner: hng
+        group: hng
+
+    - name: Install app dependencies
+      command: npm install --force
+      args:
+        chdir: /opt/stage_5b
+
+    - name: Start the application
+      become_user: hng
+      command: npm start
+      args:
+        chdir: /opt/stage_5b
+        creates: /opt/stage_5b/app.pid
+
+    - name: Configure Nginx for reverse proxy
+      copy:
+        dest: /etc/nginx/conf.d/stage_5b.conf
+        content: |
+          server {
+              listen 80;
+
+              location / {
+                  proxy_pass http://127.0.0.1:{{ app_port }};
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+        mode: '0644'
+
+    - name: Enable Nginx configuration
+      command: nginx -t
+      ignore_errors: yes
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
+
+    - name: Create systemd service file for the application
+      copy:
+        dest: /etc/systemd/system/stage_5b.service
+        content: |
+          [Unit]
+          Description=Stage 5B ExpressJS Application
+          After=network.target
+
+          [Service]
+          User=hng
+          WorkingDirectory=/opt/stage_5b
+          ExecStart=/usr/bin/node /opt/stage_5b/index.js
+          Restart=always
+          StandardOutput=file:/var/log/stage_5b/out.log
+          StandardError=file:/var/log/stage_5b/error.log
+          Environment=PORT={{ app_port }}
+          Environment=DB_USER={{ pg_admin_user }}
+          Environment=DB_HOST={{ db_host }}
+          Environment=DB_PASSWORD={{ pg_admin_password }}
+          Environment=DB_PORT={{ db_port }}
+          Environment=DB_NAME={{ pg_database }}
+          Environment=REDIS_HOST={{ redis_host }}
+          Environment=REDIS_PORT={{ redis_port }}
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Reload systemd to recognize the new service
+      command: systemctl daemon-reload
+
+    - name: Start and enable the application service
+      service:
+        name: stage_5b
+        state: started
+        enabled: yes
