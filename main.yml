@@ -23,6 +23,7 @@
           - curl
           - gnupg
           - nodejs
+          - nginx
           - python3-psycopg2
           - redis-server
           - yarn
@@ -38,24 +39,6 @@
       apt_repository:
         repo: 'deb https://deb.nodesource.com/node_18.x focal main'
         state: present
-
-    - name: Add Nginx GPG key
-      apt_key:
-        url: 'https://nginx.org/keys/nginx_signing.key'
-        state: present
-
-    - name: Add Official Nginx Repository
-      apt_repository:
-        repo: 'deb [signed-by=/usr/share/keyrings/nginx_signing.gpg] http://nginx.org/packages/ubuntu/ focal nginx'
-        state: present
-        filename: 'nginx'
-        validate_certs: no
-
-    - name: Install Nginx 1.26
-      apt:
-        name: nginx
-        state: present
-        update_cache: yes
 
     - name: Install psycopg2 using pip (if needed, for some Python versions)
       pip:
