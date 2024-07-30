@@ -14,7 +14,7 @@
     redis_port: 6379
 
   tasks:
-    - name: Ensure necessary packages are installed
+    - name: Ensuring necessary packages are installed
       apt:
         name:
           - git
@@ -22,54 +22,53 @@
           - python3-pip
           - curl
           - gnupg
-          - nodejs
           - nginx
           - python3-psycopg2
           - redis-server
-          - yarn
         state: present
         update_cache: yes
 
-    - name: Add NodeSource GPG key
-      apt_key:
-        url: 'https://deb.nodesource.com/gpgkey/nodesource.gpg.key'
-        state: present
-
-    - name: Add NodeSource APT repository
-      apt_repository:
-        repo: 'deb https://deb.nodesource.com/node_18.x focal main'
-        state: present
-
-    - name: Install psycopg2 using pip (if needed, for some Python versions)
+    - name: Installing psycopg2 using pip (if needed, for some Python versions)
       pip:
         name: psycopg2-binary
         state: present
-        extra_args: "--break-system-packages"
 
-    - name: Ensure PostgreSQL is running
+    - name: Ensuring PostgreSQL is running
       service:
         name: postgresql
         state: started
         enabled: yes
 
-    - name: Ensure Redis is running
+    - name: Ensuring Redis is running
       service:
         name: redis-server
         state: started
         enabled: yes
 
-    - name: Ensure /var/secrets directory exists
+    - name: Ensuring /var/secrets directory exists
       file:
         path: /var/secrets
         state: directory
         mode: '0700'
 
-    - name: Create PostgreSQL database
-      postgresql_db:
-        name: "{{ pg_database }}"
-        state: present
+    - name: Configure PostgreSQL to use password authentication
+      lineinfile:
+        path: /etc/postgresql/14/main/pg_hba.conf
+        regexp: '^local\s+all\s+postgres\s+md5'
+        line: 'local   all             postgres                                trust'
+    
+    - name: Restart PostgreSQL service
+      service:
+        name: postgresql
+        state: restarted
 
-    - name: Create PostgreSQL superuser
+    # - name: Set PostgreSQL postgres user password
+    #   postgresql_user:
+    #     name: postgres
+    #     password: "{{ pg_admin_password }}"
+    #     state: present
+
+    - name: Creating PostgreSQL superuser
       postgresql_user:
         name: "{{ pg_admin_user }}"
         password: "{{ pg_admin_password }}"
@@ -85,55 +84,86 @@
           Password: {{ pg_admin_password }}
         mode: '0600'
 
-    - name: Ensure the hng user exists
+    - name: Installing NVM
+      shell: |
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+      environment:
+        SHELL: /bin/bash
+      register: nvm_install
+
+    - name: Installing Node.js version 18
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        nvm install 18
+        nvm alias default 18
+      environment:
+        SHELL: /bin/bash
+      when: nvm_install is succeeded
+
+    - name: Installing Yarn globally using npm
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        npm install --global yarn
+      environment:
+        SHELL: /bin/bash
+
+    - name: Ensuring the hng user exists
       user:
         name: hng
         state: present
         shell: /bin/bash
         create_home: no
 
-    - name: Add hng user to the sudo group
+    - name: Adding hng user to the sudo group
       user:
         name: hng
         groups: sudo
         append: yes
 
-    - name: Create destination directory if it does not exist
+    - name: Creating destination directory if it does not exist
       file:
         path: /opt/stage_5b
         state: directory
         mode: '0755'
 
-    - name: Change ownership of the destination directory to hng user
+    - name: Changing ownership of the destination directory to hng user
       file:
         path: /opt/stage_5b
         owner: hng
         group: hng
         recurse: yes
 
-    - name: Create log directory
+    - name: Creating log directory
       file:
         path: /var/log/stage_5b
         state: directory
         mode: '0755'
 
-    - name: Ensure correct ownership of log directory
+    - name: Ensuring correct ownership of log directory
       file:
         path: /var/log/stage_5b
         owner: hng
         group: hng
 
-    - name: Clone the repository
+    - name: Add directory to Git safe list
+      command: git config --global --add safe.directory /opt/stage_5b
+
+    - name: Cloning the repository
       git:
         repo: 'https://github.com/hngprojects/hng_boilerplate_expressjs.git'
         dest: /opt/stage_5b
         version: 'devops'
         force: yes
 
-    - name: Copy .env.example to .env
+    - name: Copying .env.example to .env
       command: cp /opt/stage_5b/.env.example /opt/stage_5b/.env
 
-    - name: Update .env file with database and Redis credentials
+    - name: Updating .env file with database and Redis credentials
       lineinfile:
         path: /opt/stage_5b/.env
         regexp: '^{{ item.key }}='
@@ -148,25 +178,31 @@
         - { key: 'REDIS_HOST', value: '{{ redis_host }}' }
         - { key: 'REDIS_PORT', value: '{{ redis_port }}' }
 
-    - name: Change ownership of .env file to hng user
+    - name: Changing ownership of .env file to hng user
       file:
         path: /opt/stage_5b/.env
         owner: hng
         group: hng
 
-    - name: Install app dependencies
-      command: npm install --force
+    - name: Installing app dependencies
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        yarn
       args:
         chdir: /opt/stage_5b
+      # ignore_errors: yes
 
-    - name: Start the application
-      become_user: hng
-      command: npm start
+    - name: Starting the application
+      shell: |
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        yarn start
       args:
         chdir: /opt/stage_5b
         creates: /opt/stage_5b/app.pid
 
-    - name: Configure Nginx for reverse proxy
+    - name: Configuring Nginx for reverse proxy
       copy:
         dest: /etc/nginx/conf.d/stage_5b.conf
         content: |
@@ -183,7 +219,7 @@
           }
         mode: '0644'
 
-    - name: Enable Nginx configuration
+    - name: Enabling Nginx configuration
       command: nginx -t
       ignore_errors: yes
 
@@ -192,7 +228,7 @@
         name: nginx
         state: restarted
 
-    - name: Create systemd service file for the application
+    - name: Creating systemd service file for the application
       copy:
         dest: /etc/systemd/system/stage_5b.service
         content: |
@@ -220,11 +256,17 @@
           WantedBy=multi-user.target
         mode: '0644'
 
-    - name: Reload systemd to recognize the new service
+    - name: Reloading systemd to recognize the new service
       command: systemctl daemon-reload
 
-    - name: Start and enable the application service
+    - name: Starting and enabling the application service
       service:
         name: stage_5b
         state: started
         enabled: yes
+
+  handlers:
+    - name: Restart PostgreSQL
+      service:
+        name: postgresql
+        state: restarted

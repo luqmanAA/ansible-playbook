@@ -64,7 +64,7 @@ The `.env` file for the ExpressJS application is updated with the following envi
     Execute the playbook using the ansible-playbook command:
 
    ```bash
-   ansible-playbook -i main.yml -b -i your-inventory.cfg
+   ansible-playbook main.yml -b -i inventory.cfg
     ```
 
 
